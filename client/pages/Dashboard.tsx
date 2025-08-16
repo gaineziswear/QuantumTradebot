@@ -7,7 +7,28 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip, AreaChart, Area, ComposedChart, Bar } from 'recharts';
+import { Progress } from '@/components/ui/progress';
+import { Separator } from '@/components/ui/separator';
+import { 
+  LineChart, 
+  Line, 
+  XAxis, 
+  YAxis, 
+  ResponsiveContainer, 
+  Tooltip, 
+  AreaChart, 
+  Area, 
+  ComposedChart, 
+  Bar,
+  PieChart,
+  Pie,
+  Cell,
+  RadarChart,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
+  Radar
+} from 'recharts';
 import { 
   Play, 
   Square, 
@@ -32,10 +53,21 @@ import {
   Eye,
   Database,
   Shield,
-  Cpu
+  Cpu,
+  AlertTriangle,
+  CheckCircle,
+  XCircle,
+  Settings,
+  Award,
+  PieChart as PieChartIcon,
+  Layers,
+  Globe,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 import { apiClient, useAPI } from '@/lib/api';
 import { formatINR, formatINRWithDecimals, fetchUSDToINRRate, getCurrentUSDToINRRate } from '@/lib/currency';
+import { tradingWebSocket } from '@/lib/websocket';
 import type {
   TradingStatus,
   PerformanceMetrics,
@@ -59,6 +91,10 @@ export default function Dashboard() {
   const [automationStatus, setAutomationStatus] = useState<AutomationStatus | null>(null);
   const [livePrices, setLivePrices] = useState<Record<string, number>>({});
   
+  // WebSocket connection state
+  const [isConnected, setIsConnected] = useState(false);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  
   // UI State
   const [capitalAmount, setCapitalAmount] = useState('');
   const [addFundOpen, setAddFundOpen] = useState(false);
@@ -67,9 +103,72 @@ export default function Dashboard() {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
   const [livePnL, setLivePnL] = useState(0);
+  const [activeTab, setActiveTab] = useState('main');
 
   // Mobile-specific optimization
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+
+  // WebSocket setup
+  useEffect(() => {
+    // Subscribe to connection changes
+    const unsubscribeConnection = tradingWebSocket.onConnectionChange((connected) => {
+      setIsConnected(connected);
+      if (connected) {
+        setReconnectAttempts(0);
+      }
+    });
+
+    // Subscribe to trading updates
+    const unsubscribeTradingStatus = tradingWebSocket.subscribe('trading_status', (message) => {
+      setTradingStatus(message.data);
+      setLastUpdate(new Date());
+    });
+
+    const unsubscribeMarketData = tradingWebSocket.subscribe('market_data', (message) => {
+      setLivePrices(message.data);
+      setLastUpdate(new Date());
+    });
+
+    const unsubscribeTradeUpdate = tradingWebSocket.subscribe('trade_update', (message) => {
+      setTrades(prev => {
+        const newTrades = [...prev];
+        const tradeIndex = newTrades.findIndex(t => t.id === message.data.id);
+        if (tradeIndex >= 0) {
+          newTrades[tradeIndex] = message.data;
+        } else {
+          newTrades.unshift(message.data);
+        }
+        return newTrades.slice(0, 50); // Keep last 50 trades
+      });
+      setLastUpdate(new Date());
+    });
+
+    const unsubscribePerformance = tradingWebSocket.subscribe('performance_update', (message) => {
+      setPerformance(prev => ({ ...prev, ...message.data }));
+      setLastUpdate(new Date());
+    });
+
+    const unsubscribeAIStatus = tradingWebSocket.subscribe('ai_status', (message) => {
+      setAIStatus(message.data);
+      setLastUpdate(new Date());
+    });
+
+    const unsubscribePortfolio = tradingWebSocket.subscribe('portfolio_update', (message) => {
+      setPortfolio(message.data);
+      setLastUpdate(new Date());
+    });
+
+    // Cleanup
+    return () => {
+      unsubscribeConnection();
+      unsubscribeTradingStatus();
+      unsubscribeMarketData();
+      unsubscribeTradeUpdate();
+      unsubscribePerformance();
+      unsubscribeAIStatus();
+      unsubscribePortfolio();
+    };
+  }, []);
 
   // Real-time clock
   useEffect(() => {
@@ -90,12 +189,11 @@ export default function Dashboard() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Memoized load function to prevent unnecessary recreations
+  // Fallback HTTP polling for when WebSocket is disconnected
   const loadData = useCallback(async () => {
     try {
       if (isLoading) setIsLoading(true);
 
-      // Load all data in parallel for instant updates including automation status
       const [statusData, performanceData, tradesData, aiData, portfolioData, newRate, automationData, pricesData] = await Promise.all([
         api.getTradingStatus(),
         api.getPerformanceMetrics(),
@@ -117,7 +215,6 @@ export default function Dashboard() {
       setLivePrices(pricesData.prices || {});
       setLastUpdate(new Date());
 
-      // Calculate live P&L
       const totalPnL = tradesData.reduce((sum, trade) => sum + (trade.pnl || 0), 0);
       setLivePnL(totalPnL);
 
@@ -128,22 +225,21 @@ export default function Dashboard() {
     }
   }, [api, isLoading]);
 
-  // Auto-update data for instant backend updates
+  // Load data on mount and as fallback when disconnected
   useEffect(() => {
-    // Initial load
     loadData();
 
-    // Adaptive polling: slower on mobile to save battery and data
-    const pollInterval = isMobile ? 5000 : 2000; // 5s on mobile, 2s on desktop
-    const interval = setInterval(loadData, pollInterval);
+    // Only use HTTP polling when WebSocket is disconnected
+    if (!isConnected) {
+      const pollInterval = isMobile ? 10000 : 5000; // Slower polling when disconnected
+      const interval = setInterval(loadData, pollInterval);
+      return () => clearInterval(interval);
+    }
+  }, [loadData, isMobile, isConnected]);
 
-    return () => clearInterval(interval);
-  }, [loadData, isMobile]);
-
-  // Trading controls - Enhanced for hedge fund automation
+  // Trading controls
   const handleStart = async () => {
     try {
-      // Use new hedge fund automation endpoint
       const response = await fetch('/api/automation/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
@@ -256,11 +352,47 @@ export default function Dashboard() {
     };
   }, [tradingStatus?.current_capital, performance?.total_pnl, performance?.daily_pnl, livePnL]);
 
+  // Portfolio chart data
+  const portfolioChartData = useMemo(() => {
+    if (!portfolio?.portfolio) return [];
+    
+    return portfolio.portfolio.map((item, index) => ({
+      name: item.asset,
+      value: item.value_usdt * exchangeRate,
+      percentage: item.percentage,
+      fill: `hsl(${index * 137.5 % 360}, 70%, 50%)`
+    }));
+  }, [portfolio, exchangeRate]);
+
+  // Performance chart data
+  const performanceChartData = useMemo(() => {
+    return trades.map((trade, i) => ({
+      name: `${i + 1}`,
+      pnl: (trade.pnl || 0) * exchangeRate,
+      cumulative: trades.slice(0, i + 1).reduce((sum, t) => sum + ((t.pnl || 0) * exchangeRate), 0),
+      timestamp: trade.timestamp
+    }));
+  }, [trades, exchangeRate]);
+
+  // Risk metrics radar data
+  const riskRadarData = useMemo(() => {
+    if (!performance) return [];
+    
+    return [
+      { metric: 'Sharpe Ratio', value: Math.min((performance.sharpe_ratio || 0) * 20, 100) },
+      { metric: 'Win Rate', value: performance.win_rate || 0 },
+      { metric: 'Max Drawdown', value: Math.max(100 - (performance.max_drawdown || 0) * 100, 0) },
+      { metric: 'Volatility', value: Math.max(100 - (performance.volatility || 0) * 100, 0) },
+      { metric: 'VAR Control', value: Math.max(100 - (performance.var || 0) / 1000, 0) },
+      { metric: 'Trade Count', value: Math.min((performance.total_trades || 0) * 5, 100) }
+    ];
+  }, [performance]);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-white text-gray-900 flex flex-col font-['Inter',sans-serif] md:overflow-hidden mobile-optimized">
       <div className="h-full flex flex-col max-w-[2000px] mx-auto w-full mobile-safe-area">
         
-        {/* Ultra-Professional Header - Mobile Optimized */}
+        {/* Ultra-Professional Header */}
         <motion.div
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -269,7 +401,7 @@ export default function Dashboard() {
           <div className="px-3 sm:px-4 md:px-6 py-4 phone-p-2">
             <div className="flex justify-between items-center">
 
-              {/* Left: Bot Status & Capital - Responsive */}
+              {/* Left: Bot Status & Capital */}
               <div className="flex items-center gap-2 md:gap-6">
                 <div className="flex items-center gap-2 md:gap-3">
                   <div className="relative">
@@ -292,6 +424,18 @@ export default function Dashboard() {
                 </div>
 
                 <div className="hidden md:block h-6 w-px bg-gray-200" />
+
+                {/* WebSocket Status Indicator */}
+                <div className="hidden md:flex items-center gap-2">
+                  {isConnected ? (
+                    <Wifi className="w-4 h-4 text-green-500" />
+                  ) : (
+                    <WifiOff className="w-4 h-4 text-red-500" />
+                  )}
+                  <span className="text-xs text-gray-500">
+                    {isConnected ? 'Real-time' : 'Polling'}
+                  </span>
+                </div>
 
                 <div className="hidden md:flex items-center gap-2">
                   <div className={`w-2 h-2 rounded-full ${automationStatus?.trading_mode === 'live' ? 'bg-red-500' : 'bg-yellow-500'}`} />
@@ -321,7 +465,7 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {/* Right: Time & Controls - Responsive */}
+              {/* Right: Time & Controls */}
               <div className="flex items-center gap-2 md:gap-4">
                 <div className="text-right">
                   <div className="text-xs md:text-sm font-mono text-gray-900">
@@ -347,11 +491,11 @@ export default function Dashboard() {
           </div>
         </motion.div>
 
-        {/* Main Content Area - Mobile Optimized */}
+        {/* Main Content Area */}
         <div className="flex-1 md:overflow-hidden overflow-y-auto mobile-scroll">
-          <Tabs defaultValue="main" className="h-full flex flex-col landscape-compact">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full flex flex-col landscape-compact">
 
-            {/* Tab Navigation - Mobile Optimized */}
+            {/* Tab Navigation */}
             <div className="bg-white border-b border-gray-100 px-3 sm:px-4 md:px-6 mobile-safe-area">
               <TabsList className="bg-transparent border-none h-12 md:h-12 p-0 gap-2 sm:gap-4 md:gap-8 overflow-x-auto mobile-scroll">
                 {[
@@ -373,14 +517,12 @@ export default function Dashboard() {
               </TabsList>
             </div>
 
-            {/* Main Trading Tab - Responsive Grid */}
+            {/* Main Trading Tab */}
             <TabsContent value="main" className="flex-1 md:overflow-hidden m-0 p-0">
               <div className="h-full p-4 md:p-6">
                 <div className="h-full flex flex-col lg:grid lg:grid-cols-12 gap-4 md:gap-6">
                   
-                  {/* Mobile: Stacked Layout, Desktop: 3-column Grid */}
-
-                  {/* Top Section on Mobile - Live Trades Feed (was right column) */}
+                  {/* Mobile Live Trades Feed */}
                   <div className="lg:hidden order-1">
                     <Card className="border-0 shadow-lg bg-white rounded-2xl">
                       <CardHeader className="pb-4">
@@ -575,12 +717,10 @@ export default function Dashboard() {
                                 {automationStatus?.progress_percentage?.toFixed(0) || '0'}%
                               </span>
                             </div>
-                            <div className="w-full bg-gray-200 rounded-full h-2">
-                              <div
-                                className="bg-gradient-to-r from-blue-500 to-purple-600 h-2 rounded-full transition-all duration-500"
-                                style={{ width: `${automationStatus?.progress_percentage || 0}%` }}
-                              />
-                            </div>
+                            <Progress 
+                              value={automationStatus?.progress_percentage || 0} 
+                              className="h-2"
+                            />
                           </div>
 
                           <div className="pt-3 border-t border-gray-100">
@@ -621,32 +761,12 @@ export default function Dashboard() {
                         </div>
                       </CardContent>
                     </Card>
-
-                    {/* Market Scanner - Hidden on mobile */}
-                    <Card className="hidden lg:block border-0 shadow-lg bg-white rounded-2xl">
-                      <CardHeader className="pb-4">
-                        <CardTitle className="text-lg font-bold text-gray-900 flex items-center gap-2">
-                          <Eye className="w-5 h-5" />
-                          Market Focus
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        <div className="space-y-3">
-                          {['BTC/USDT', 'ETH/USDT', 'BNB/USDT'].map((symbol, index) => (
-                            <div key={symbol} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                              <span className="font-medium text-sm">{symbol}</span>
-                              <div className="text-xs text-gray-500">Live</div>
-                            </div>
-                          ))}
-                        </div>
-                      </CardContent>
-                    </Card>
                   </div>
 
-                  {/* Center Column - Performance Chart and Mobile P&L */}
+                  {/* Center Column - Performance Chart */}
                   <div className="lg:col-span-6 order-3 lg:order-2 space-y-4 lg:space-y-6">
 
-                    {/* Large P&L Display - Smaller on mobile */}
+                    {/* Large P&L Display */}
                     <Card className="border-0 shadow-lg bg-gradient-to-r from-gray-50 to-white rounded-2xl">
                       <CardContent className="p-4 lg:p-8 text-center">
                         <div className="mb-3 lg:mb-4">
@@ -709,13 +829,9 @@ export default function Dashboard() {
                       </CardHeader>
                       <CardContent>
                         <div className="h-64 lg:h-80">
-                          {trades.length > 0 ? (
+                          {performanceChartData.length > 0 ? (
                             <ResponsiveContainer width="100%" height="100%">
-                              <ComposedChart data={trades.map((trade, i) => ({
-                                name: `${i + 1}`,
-                                pnl: (trade.pnl || 0) * exchangeRate,
-                                cumulative: trades.slice(0, i + 1).reduce((sum, t) => sum + ((t.pnl || 0) * exchangeRate), 0)
-                              }))}>
+                              <ComposedChart data={performanceChartData}>
                                 <defs>
                                   <linearGradient id="pnlGradient" x1="0" y1="0" x2="0" y2="1">
                                     <stop offset="5%" stopColor="#059669" stopOpacity={0.3}/>
@@ -760,7 +876,7 @@ export default function Dashboard() {
                     </Card>
                   </div>
 
-                  {/* Right Column - AI Insights (Desktop only - Live Trades moved to center) */}
+                  {/* Right Column - AI Insights & Live Trades (Desktop) */}
                   <div className="hidden lg:block lg:col-span-3 order-4 lg:order-3 space-y-6">
 
                     {/* AI Model Status */}
@@ -777,12 +893,10 @@ export default function Dashboard() {
                             <span className="text-sm text-gray-600">Training Progress</span>
                             <span className="text-sm font-bold text-gray-900">{aiStatus?.progress_percentage?.toFixed(0) || '0'}%</span>
                           </div>
-                          <div className="w-full bg-gray-200 rounded-full h-2">
-                            <div
-                              className="bg-gradient-to-r from-blue-500 to-purple-600 h-2 rounded-full transition-all duration-500"
-                              style={{ width: `${aiStatus?.progress_percentage || 0}%` }}
-                            />
-                          </div>
+                          <Progress 
+                            value={aiStatus?.progress_percentage || 0} 
+                            className="h-2"
+                          />
                         </div>
 
                         <div className="grid grid-cols-2 gap-3">
@@ -867,51 +981,439 @@ export default function Dashboard() {
               </div>
             </TabsContent>
 
-            {/* Other Tabs - Simplified */}
+            {/* Performance Analytics Tab */}
             <TabsContent value="performance" className="flex-1 overflow-hidden m-0 p-0">
-              <div className="h-full flex items-center justify-center">
-                <div className="text-center">
-                  <TrendingUp className="w-20 h-20 mx-auto mb-6 text-gray-300" />
-                  <h3 className="text-2xl font-bold text-gray-900 mb-2">Performance Analytics</h3>
-                  <p className="text-gray-600">Detailed analytics available when trading is active</p>
+              <div className="h-full p-4 md:p-6 overflow-y-auto">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  
+                  {/* Risk Metrics Radar Chart */}
+                  <Card className="border-0 shadow-lg bg-white rounded-2xl">
+                    <CardHeader>
+                      <CardTitle className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                        <Shield className="w-5 h-5" />
+                        Risk Profile
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="h-80">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <RadarChart data={riskRadarData}>
+                            <PolarGrid />
+                            <PolarAngleAxis dataKey="metric" tick={{ fontSize: 12 }} />
+                            <PolarRadiusAxis angle={90} domain={[0, 100]} tick={{ fontSize: 10 }} />
+                            <Radar
+                              name="Risk Metrics"
+                              dataKey="value"
+                              stroke="#059669"
+                              fill="#059669"
+                              fillOpacity={0.3}
+                              strokeWidth={2}
+                            />
+                          </RadarChart>
+                        </ResponsiveContainer>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  {/* Performance Metrics */}
+                  <Card className="border-0 shadow-lg bg-white rounded-2xl">
+                    <CardHeader>
+                      <CardTitle className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                        <Award className="w-5 h-5" />
+                        Performance Metrics
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-4">
+                        {[
+                          { label: 'Sharpe Ratio', value: performance?.sharpe_ratio?.toFixed(2) || '0.00', good: (performance?.sharpe_ratio || 0) > 1 },
+                          { label: 'Max Drawdown', value: `${((performance?.max_drawdown || 0) * 100).toFixed(1)}%`, good: (performance?.max_drawdown || 0) < 0.1 },
+                          { label: 'Win Rate', value: `${(performance?.win_rate || 0).toFixed(1)}%`, good: (performance?.win_rate || 0) > 60 },
+                          { label: 'Total Trades', value: (performance?.total_trades || 0).toString(), good: (performance?.total_trades || 0) > 10 },
+                          { label: 'Volatility', value: `${((performance?.volatility || 0) * 100).toFixed(1)}%`, good: (performance?.volatility || 0) < 0.3 },
+                          { label: 'VaR (95%)', value: formatINR(performance?.var || 0), good: (performance?.var || 0) < 1000 }
+                        ].map((metric, index) => (
+                          <div key={metric.label} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                            <span className="text-sm font-medium text-gray-700">{metric.label}</span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-bold text-gray-900">{metric.value}</span>
+                              {metric.good ? (
+                                <CheckCircle className="w-4 h-4 text-green-500" />
+                              ) : (
+                                <AlertTriangle className="w-4 h-4 text-yellow-500" />
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  {/* Historical Performance Chart */}
+                  <Card className="border-0 shadow-lg bg-white rounded-2xl lg:col-span-2">
+                    <CardHeader>
+                      <CardTitle className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                        <TrendingUp className="w-5 h-5" />
+                        Historical Performance
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="h-80">
+                        {performanceChartData.length > 0 ? (
+                          <ResponsiveContainer width="100%" height="100%">
+                            <AreaChart data={performanceChartData}>
+                              <defs>
+                                <linearGradient id="performanceGradient" x1="0" y1="0" x2="0" y2="1">
+                                  <stop offset="5%" stopColor="#059669" stopOpacity={0.8}/>
+                                  <stop offset="95%" stopColor="#059669" stopOpacity={0.1}/>
+                                </linearGradient>
+                              </defs>
+                              <XAxis dataKey="name" tick={{ fontSize: 12 }} stroke="#6B7280" />
+                              <YAxis tick={{ fontSize: 12 }} stroke="#6B7280" />
+                              <Tooltip
+                                formatter={(value: number) => [formatINR(value), 'Cumulative P&L']}
+                                labelStyle={{ color: '#374151' }}
+                                contentStyle={{
+                                  backgroundColor: 'white',
+                                  border: '1px solid #E5E7EB',
+                                  borderRadius: '8px'
+                                }}
+                              />
+                              <Area
+                                type="monotone"
+                                dataKey="cumulative"
+                                stroke="#059669"
+                                strokeWidth={2}
+                                fill="url(#performanceGradient)"
+                              />
+                            </AreaChart>
+                          </ResponsiveContainer>
+                        ) : (
+                          <div className="flex items-center justify-center h-full text-gray-400">
+                            <div className="text-center">
+                              <TrendingUp className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                              <p className="text-lg font-medium">Performance Analytics</p>
+                              <p className="text-sm">Data will appear as trades are executed</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
                 </div>
               </div>
             </TabsContent>
 
+            {/* Portfolio Tab */}
             <TabsContent value="portfolio" className="flex-1 overflow-hidden m-0 p-0">
-              <div className="h-full flex items-center justify-center">
-                <div className="text-center">
-                  <BarChart3 className="w-20 h-20 mx-auto mb-6 text-gray-300" />
-                  <h3 className="text-2xl font-bold text-gray-900 mb-2">Portfolio Analysis</h3>
-                  <p className="text-gray-600">Portfolio breakdown and allocation insights</p>
+              <div className="h-full p-4 md:p-6 overflow-y-auto">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  
+                  {/* Portfolio Allocation Chart */}
+                  <Card className="border-0 shadow-lg bg-white rounded-2xl">
+                    <CardHeader>
+                      <CardTitle className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                        <PieChartIcon className="w-5 h-5" />
+                        Asset Allocation
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="h-80">
+                        {portfolioChartData.length > 0 ? (
+                          <ResponsiveContainer width="100%" height="100%">
+                            <PieChart>
+                              <Pie
+                                data={portfolioChartData}
+                                cx="50%"
+                                cy="50%"
+                                outerRadius={100}
+                                fill="#8884d8"
+                                dataKey="value"
+                                label={({ name, percentage }) => `${name}: ${percentage.toFixed(1)}%`}
+                              >
+                                {portfolioChartData.map((entry, index) => (
+                                  <Cell key={`cell-${index}`} fill={entry.fill} />
+                                ))}
+                              </Pie>
+                              <Tooltip formatter={(value: number) => formatINR(value)} />
+                            </PieChart>
+                          </ResponsiveContainer>
+                        ) : (
+                          <div className="flex items-center justify-center h-full text-gray-400">
+                            <div className="text-center">
+                              <PieChartIcon className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                              <p className="text-lg font-medium">Portfolio Allocation</p>
+                              <p className="text-sm">Portfolio data will appear here</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  {/* Portfolio Summary */}
+                  <Card className="border-0 shadow-lg bg-white rounded-2xl">
+                    <CardHeader>
+                      <CardTitle className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                        <Layers className="w-5 h-5" />
+                        Portfolio Summary
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-4">
+                        <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg">
+                          <div className="text-sm text-gray-600 mb-1">Total Portfolio Value</div>
+                          <div className="text-2xl font-bold text-gray-900">
+                            {formatINR((portfolio?.total_value_usdt || 0) * exchangeRate)}
+                          </div>
+                        </div>
+
+                        {portfolio?.portfolio?.map((asset, index) => (
+                          <div key={asset.asset} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                            <div>
+                              <div className="font-medium text-gray-900">{asset.asset}</div>
+                              <div className="text-sm text-gray-500">{asset.balance.toFixed(6)}</div>
+                            </div>
+                            <div className="text-right">
+                              <div className="font-bold text-gray-900">{formatINR(asset.value_usdt * exchangeRate)}</div>
+                              <div className="text-sm text-gray-500">{asset.percentage.toFixed(1)}%</div>
+                            </div>
+                          </div>
+                        )) || (
+                          <div className="text-center py-8 text-gray-400">
+                            <div className="text-sm">No portfolio data available</div>
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
                 </div>
               </div>
             </TabsContent>
 
+            {/* AI Training Tab */}
             <TabsContent value="training" className="flex-1 overflow-hidden m-0 p-0">
-              <div className="h-full flex items-center justify-center">
-                <div className="text-center">
-                  <Brain className="w-20 h-20 mx-auto mb-6 text-gray-300" />
-                  <h3 className="text-2xl font-bold text-gray-900 mb-2">AI Training Center</h3>
-                  <p className="text-gray-600">Model training metrics and performance data</p>
+              <div className="h-full p-4 md:p-6 overflow-y-auto">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  
+                  {/* AI Training Status */}
+                  <Card className="border-0 shadow-lg bg-white rounded-2xl">
+                    <CardHeader>
+                      <CardTitle className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                        <Brain className="w-5 h-5" />
+                        AI Training Status
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-6">
+                      
+                      {/* Training Progress */}
+                      <div>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm font-medium text-gray-700">Training Progress</span>
+                          <span className="text-sm font-bold text-gray-900">
+                            {aiStatus?.progress_percentage?.toFixed(0) || '0'}%
+                          </span>
+                        </div>
+                        <Progress value={aiStatus?.progress_percentage || 0} className="h-3" />
+                        <div className="flex justify-between text-xs text-gray-500 mt-1">
+                          <span>Epoch {aiStatus?.current_epoch || 0}</span>
+                          <span>of {aiStatus?.total_epochs || 1000}</span>
+                        </div>
+                      </div>
+
+                      {/* Model Statistics */}
+                      <div className="grid grid-cols-2 gap-4">
+                        <div className="text-center p-4 bg-blue-50 rounded-lg">
+                          <div className="text-2xl font-bold text-blue-600">{aiStatus?.model_confidence || 'N/A'}</div>
+                          <div className="text-sm text-gray-600">Confidence</div>
+                        </div>
+                        <div className="text-center p-4 bg-green-50 rounded-lg">
+                          <div className="text-2xl font-bold text-green-600">{aiStatus?.feature_count || 0}</div>
+                          <div className="text-sm text-gray-600">Features</div>
+                        </div>
+                      </div>
+
+                      {/* Training Status */}
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm text-gray-600">Status</span>
+                          <Badge className={aiStatus?.is_training ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'}>
+                            {aiStatus?.is_training ? 'Training' : 'Ready'}
+                          </Badge>
+                        </div>
+                        
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm text-gray-600">Model Version</span>
+                          <span className="text-sm font-medium text-gray-900">{aiStatus?.model_version || 'v1.0.0'}</span>
+                        </div>
+                        
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm text-gray-600">Last Training</span>
+                          <span className="text-sm font-medium text-gray-900">
+                            {aiStatus?.last_training ? new Date(aiStatus.last_training).toLocaleDateString() : 'Never'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Control Buttons */}
+                      <div className="space-y-3">
+                        <Button
+                          onClick={async () => {
+                            try {
+                              const response = await fetch('/api/ai/train', { method: 'POST' });
+                              const result = await response.json();
+                              console.log('Training started:', result);
+                            } catch (error) {
+                              console.error('Failed to start training:', error);
+                            }
+                          }}
+                          disabled={aiStatus?.is_training}
+                          className="w-full"
+                        >
+                          {aiStatus?.is_training ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                              Training in Progress
+                            </>
+                          ) : (
+                            <>
+                              <Brain className="w-4 h-4 mr-2" />
+                              Start AI Training
+                            </>
+                          )}
+                        </Button>
+
+                        <Button
+                          onClick={async () => {
+                            try {
+                              const response = await fetch('/api/data/download', { method: 'POST' });
+                              const result = await response.json();
+                              console.log('Data download started:', result);
+                            } catch (error) {
+                              console.error('Failed to start data download:', error);
+                            }
+                          }}
+                          variant="outline"
+                          className="w-full"
+                        >
+                          <Database className="w-4 h-4 mr-2" />
+                          Download Fresh Data
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  {/* Model Architecture */}
+                  <Card className="border-0 shadow-lg bg-white rounded-2xl">
+                    <CardHeader>
+                      <CardTitle className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                        <Settings className="w-5 h-5" />
+                        Model Architecture
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-4">
+                        {[
+                          { name: 'LSTM Network', description: 'Deep learning with attention mechanism', status: 'Active' },
+                          { name: 'Random Forest', description: 'Ensemble model for feature importance', status: 'Active' },
+                          { name: 'Gradient Boosting', description: 'Advanced boosting algorithm', status: 'Active' },
+                          { name: 'Technical Analysis', description: '50+ indicators and patterns', status: 'Active' },
+                          { name: 'Risk Management', description: 'Kelly Criterion & VaR models', status: 'Active' },
+                          { name: 'Portfolio Optimization', description: 'Modern Portfolio Theory', status: 'Active' }
+                        ].map((component, index) => (
+                          <div key={component.name} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                            <div>
+                              <div className="font-medium text-gray-900">{component.name}</div>
+                              <div className="text-sm text-gray-500">{component.description}</div>
+                            </div>
+                            <Badge className="bg-green-100 text-green-700">
+                              {component.status}
+                            </Badge>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
                 </div>
               </div>
             </TabsContent>
 
+            {/* History Tab */}
             <TabsContent value="history" className="flex-1 overflow-hidden m-0 p-0">
-              <div className="h-full flex items-center justify-center">
-                <div className="text-center">
-                  <History className="w-20 h-20 mx-auto mb-6 text-gray-300" />
-                  <h3 className="text-2xl font-bold text-gray-900 mb-2">Trade History</h3>
-                  <p className="text-gray-600">Complete historical trading record</p>
-                </div>
+              <div className="h-full p-4 md:p-6 overflow-y-auto">
+                <Card className="border-0 shadow-lg bg-white rounded-2xl">
+                  <CardHeader>
+                    <CardTitle className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                      <History className="w-5 h-5" />
+                      Complete Trade History
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-3">
+                      {trades.length > 0 ? trades.map((trade, index) => (
+                        <motion.div
+                          key={trade.id}
+                          initial={{ opacity: 0, y: 20 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ delay: index * 0.02 }}
+                          className="flex items-center justify-between p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                        >
+                          <div className="flex items-center gap-4">
+                            <Badge
+                              className={`text-sm px-3 py-1 font-semibold ${
+                                trade.side === 'BUY'
+                                  ? 'bg-green-100 text-green-700'
+                                  : 'bg-red-100 text-red-700'
+                              }`}
+                            >
+                              {trade.side}
+                            </Badge>
+                            <div>
+                              <div className="font-medium text-gray-900">{trade.symbol}</div>
+                              <div className="text-sm text-gray-500">
+                                {new Date(trade.timestamp).toLocaleString()}
+                              </div>
+                            </div>
+                            <div className="text-center">
+                              <div className="text-sm text-gray-600">Entry</div>
+                              <div className="font-medium text-gray-900">{formatINR(trade.entry_price)}</div>
+                            </div>
+                            {trade.exit_price && (
+                              <div className="text-center">
+                                <div className="text-sm text-gray-600">Exit</div>
+                                <div className="font-medium text-gray-900">{formatINR(trade.exit_price)}</div>
+                              </div>
+                            )}
+                          </div>
+                          <div className="text-right">
+                            <div className="text-sm text-gray-600">P&L</div>
+                            {trade.pnl && (
+                              <div className={`text-lg font-bold ${trade.pnl > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                {trade.pnl > 0 ? '+' : ''}{formatINR(trade.pnl)}
+                              </div>
+                            )}
+                            <div className="text-xs text-gray-500">
+                              {trade.status === 'OPEN' ? 'Open' : 'Closed'}
+                            </div>
+                          </div>
+                        </motion.div>
+                      )) : (
+                        <div className="text-center py-12 text-gray-400">
+                          <History className="w-20 h-20 mx-auto mb-6 opacity-50" />
+                          <h3 className="text-xl font-medium text-gray-900 mb-2">No Trade History</h3>
+                          <p className="text-gray-600">Trade history will appear here once trading begins</p>
+                        </div>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
               </div>
             </TabsContent>
 
           </Tabs>
         </div>
 
-        {/* Enhanced Live Price Ticker - Hidden on mobile */}
+        {/* Enhanced Live Price Ticker */}
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -933,6 +1435,16 @@ export default function Dashboard() {
             </div>
 
             <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                {isConnected ? (
+                  <Wifi className="w-4 h-4 text-green-500" />
+                ) : (
+                  <WifiOff className="w-4 h-4 text-red-500" />
+                )}
+                <span className="text-xs text-gray-500">
+                  {isConnected ? 'Live Connection' : 'Reconnecting...'}
+                </span>
+              </div>
               <div className="text-xs text-gray-500">
                 Mode: <span className="font-medium uppercase">{automationStatus?.trading_mode || 'TESTNET'}</span>
               </div>
