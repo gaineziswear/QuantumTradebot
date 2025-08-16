@@ -1,0 +1,44 @@
+# Cloudflare Tunnel Configuration for AI Crypto Trading Bot
+# 
+# This configuration sets up secure remote access to your trading bot
+# without exposing ports or requiring port forwarding.
+# 
+# Setup Instructions:
+# 1. Install cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/
+# 2. Login: cloudflared tunnel login
+# 3. Create tunnel: cloudflared tunnel create crypto-trading-bot
+# 4. Update this file with your tunnel UUID
+# 5. Run: cloudflared tunnel --config cloudflare-tunnel.yml run
+#
+# Replace YOUR_TUNNEL_UUID with the actual UUID from step 3
+
+tunnel: YOUR_TUNNEL_UUID
+credentials-file: /path/to/YOUR_TUNNEL_UUID.json
+
+ingress:
+  # Route your custom domain to the trading bot
+  - hostname: your-trading-bot.yourdomain.com
+    service: http://localhost:8000
+    originRequest:
+      # Enable WebSocket support for real-time updates
+      noTLSVerify: false
+      connectTimeout: 30s
+      tlsTimeout: 30s
+      tcpKeepAlive: 30s
+      keepAliveConnections: 10
+      keepAliveTimeout: 90s
+      httpHostHeader: localhost:8000
+  
+  # Catch-all rule (required)
+  - service: http_status:404
+
+# Optional: Configure additional settings
+retries: 3
+grace-period: 30s
+
+# Logging
+loglevel: info
+logfile: /var/log/cloudflared.log
+
+# Metrics (optional)
+metrics: localhost:8080
